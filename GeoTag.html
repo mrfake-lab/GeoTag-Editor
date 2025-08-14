@@ -1,0 +1,570 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Geotag Overlay – Full Export + EXIF</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;700;900&display=swap" rel="stylesheet">
+
+  <!-- Leaflet (map) -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+
+  <!-- EXIF writer + DOM rasterizer -->
+  <script src="https://cdn.jsdelivr.net/npm/piexifjs@1.0.6/piexif.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+
+  <style>
+    :root{ --radius:14px; --shadow:0 10px 24px rgba(0,0,0,.28); --accent:#4b7bec; }
+    *{box-sizing:border-box}
+    body{ margin:0; font:15px/1.45 Roboto,system-ui,-apple-system,Segoe UI,Helvetica,Arial; color:#e8ecff; background:#0a0d1b; }
+    .wrap{ max-width:1200px; margin:28px auto 56px; padding:0 16px; }
+    h1{ margin:0 0 10px; font-weight:900; }
+
+    /* Photo canvas – sized to actual photo after load */
+    .photo-canvas{
+      position:relative;
+      width:min(92vw,1000px);    /* placeholder; replaced after load */
+      aspect-ratio:4/3;          /* placeholder; replaced after load */
+      border:2px dashed rgba(255,255,255,.22);
+      border-radius:16px;
+      display:grid; place-items:center;
+      background:rgba(255,255,255,.03);
+      color:#c7d2ff; cursor:pointer;
+      transition:border-color .2s, transform .05s;
+      overflow:hidden; box-shadow:var(--shadow);
+      user-select:none; margin:0 auto;
+    }
+    .photo-canvas.dragover{ border-color:var(--accent); transform:scale(.999); }
+    .photo-canvas input[type="file"]{ display:none; }
+    .placeholder{ padding:28px 20px; text-align:center; }
+    #photo{ display:none; position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+
+    /* Bottom overlay = 20% of photo height */
+    .overlay{
+      position:absolute; left:0; right:0; bottom:0;
+      height:120px; min-height:64px;
+      display:flex; pointer-events:none;
+    }
+    .map-wrap{
+      position:relative; height:100%; aspect-ratio:1/1;
+      background:#000; border-top-left-radius:var(--radius); overflow:hidden;
+      box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);
+      pointer-events:auto;
+    }
+    #map{ width:100%; height:100%; }
+    .g-watermark{
+      position:absolute; left:6px; bottom:6px;
+      font:700 14px/1 Roboto,Arial,sans-serif; color:#fff; letter-spacing:-.2px; opacity:.95; pointer-events:none;
+      text-shadow:-1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 -1px 0 #000, 0 1px 0 #000, -1px 0 0 #000, 1px 0 0 #000;
+    }
+    .info{
+      flex:1; background:rgba(0,0,0,.70); color:#fff; padding:10px 14px;
+      border-top-right-radius:var(--radius);
+      display:flex; flex-direction:column; justify-content:center; gap:4px;
+      text-shadow:0 1px 1px rgba(0,0,0,.55);
+    }
+    .title{ font-size:clamp(18px,3.2vh,26px); font-weight:900; line-height:1.15; margin-bottom:2px; }
+    .line{ font-size:clamp(12px,2.3vh,15px); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .line.dim{ opacity:.92; }
+
+    .panel{
+      margin:16px auto 0; max-width:1000px; background:#0f1330;
+      border:1px solid rgba(255,255,255,.10); border-radius:14px; padding:16px; box-shadow:var(--shadow);
+    }
+    .grid{ display:grid; grid-template-columns:repeat(12,1fr); gap:12px; }
+    .field{ grid-column:span 6; display:flex; flex-direction:column; gap:6px; }
+    .field--wide{ grid-column:1/-1; }
+    .field--third{ grid-column:span 4; }
+    .field label{ font-size:13px; color:#bcd0ff; }
+    .field input{ border:1px solid rgba(255,255,255,.14); background:rgba(255,255,255,.06); color:#fff; padding:10px 12px; border-radius:10px; outline:none; font-size:14px; }
+    .row-actions{ margin-top:10px; display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+    button{ appearance:none; border:1px solid rgba(255,255,255,.18); background:linear-gradient(180deg,rgba(255,255,255,.12),rgba(255,255,255,.06)); color:#fff; padding:10px 14px; border-radius:10px; cursor:pointer; font-weight:700; }
+    button.primary{ border-color:transparent; background:linear-gradient(180deg,#5e8cff,#335bff); box-shadow:0 6px 18px rgba(64,102,255,.35), inset 0 0 0 1px rgba(255,255,255,.12); }
+    .status{ margin-left:auto; color:#9dd8ff; font-size:13px; }
+    .error{ color:#ff9b9b; }
+
+    @media (max-width:720px){ .field{ grid-column:span 12; } .field--third{ grid-column:span 6; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Geotag Overlay</h1>
+
+    <!-- Photo + Overlay -->
+    <div id="dropZone" class="photo-canvas" aria-label="Drop an image here or click to upload">
+      <input id="fileInput" type="file" accept="image/*" />
+      <div id="placeholder" class="placeholder">
+        <div style="font-size:17px;margin-bottom:6px;">🖼️ <b>Drag & drop</b> a photo here</div>
+        <div>…or click to upload</div>
+      </div>
+      <img id="photo" alt="Your photo" />
+      <div id="overlay" class="overlay" hidden>
+        <div class="map-wrap">
+          <div id="map"></div>
+          <div class="g-watermark">Google</div>
+        </div>
+        <div class="info">
+          <div id="o_title" class="title">—</div>
+          <div id="o_address" class="line">—</div>
+          <div id="o_coords" class="line dim">—</div>
+          <div id="o_datetime" class="line dim">—</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Controls -->
+    <div class="panel">
+      <div class="grid">
+        <div class="field field--wide">
+          <label for="location">Location title (big text)</label>
+          <input id="location" type="text" placeholder="e.g., Kapurthala, Punjab, India" />
+        </div>
+        <div class="field field--wide">
+          <label for="address">Address / full line</label>
+          <input id="address" type="text" placeholder="e.g., 6pw2+qq8, Mechanical Link Rd, Kapurthala, Punjab 144411, India" />
+        </div>
+        <div class="field field--third">
+          <label for="lat">Latitude</label>
+          <input id="lat" type="text" placeholder="31.246406" />
+        </div>
+        <div class="field field--third">
+          <label for="lon">Longitude</label>
+          <input id="lon" type="text" placeholder="75.702438" />
+        </div>
+        <div class="field field--third">
+          <label for="zoom">Map Zoom (2–18)</label>
+          <input id="zoom" type="number" min="2" max="18" value="16" />
+        </div>
+        <div class="field field--third">
+          <label for="date">Date</label>
+          <input id="date" type="date" />
+        </div>
+        <div class="field field--third">
+          <label for="time">Time</label>
+          <input id="time" type="time" />
+        </div>
+      </div>
+
+      <div class="row-actions">
+        <button id="btnGeocode" type="button">Find by Place → Lat/Lon</button>
+        <button id="btnReverse" type="button">Lat/Lon → Address</button>
+        <button id="btnUseMarker" type="button">Use Marker → Fields</button>
+        <button id="btnApply" class="primary" type="button">Apply to Photo</button>
+        <button id="btnDownload" class="primary" type="button">Download JPEG (Overlay + EXIF)</button>
+        <button id="btnClear" type="button">Clear Photo</button>
+        <span id="status" class="status"></span>
+      </div>
+      <div style="font-size:12px;opacity:.85;margin-top:8px;">
+        Export renders the full photo with the overlay, then embeds GPS + Date/Time EXIF.  
+        If the download doesn’t start, check the status note here—some networks block map tiles for canvas export.
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ------- Elements -------
+    const dropZone = document.getElementById('dropZone');
+    const fileInput = document.getElementById('fileInput');
+    const placeholder = document.getElementById('placeholder');
+    const img = document.getElementById('photo');
+    const overlay = document.getElementById('overlay');
+    const statusEl = document.getElementById('status');
+
+    const fLocation = document.getElementById('location');
+    const fAddress  = document.getElementById('address');
+    const fLat = document.getElementById('lat');
+    const fLon = document.getElementById('lon');
+    const fZoom = document.getElementById('zoom');
+    const fDate = document.getElementById('date');
+    const fTime = document.getElementById('time');
+
+    const oTitle = document.getElementById('o_title');
+    const oAddress = document.getElementById('o_address');
+    const oCoords = document.getElementById('o_coords');
+    const oDatetime = document.getElementById('o_datetime');
+
+    // ------- Map (satellite-like) -------
+    const map = L.map('map', { zoomControl:false, attributionControl:false }).setView([20.5937, 78.9629], 4);
+    L.tileLayer(
+      'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+      { maxZoom:19, crossOrigin:true }  // try to keep canvas untainted
+    ).addTo(map);
+    const marker = L.marker([20.5937, 78.9629], { draggable:true }).addTo(map);
+
+    marker.on('dragend', () => {
+      const ll = marker.getLatLng();
+      fLat.value = ll.lat.toFixed(6);
+      fLon.value = ll.lng.toFixed(6);
+      status(`Marker: ${ll.lat.toFixed(5)}, ${ll.lng.toFixed(5)}`);
+    });
+
+    // ------- Sizing to match the photo -------
+    let natW=null, natH=null, origDataURL=null;
+    function fitCanvasToPhoto(){
+      if(!natW || !natH) return;
+      const maxW = Math.min(window.innerWidth * 0.92, 1200);
+      const displayW = Math.min(natW, maxW);
+      dropZone.style.width = displayW + 'px';
+      dropZone.style.aspectRatio = `${natW} / ${natH}`;
+      setTimeout(()=> map.invalidateSize(), 80);
+    }
+    window.addEventListener('resize', fitCanvasToPhoto);
+
+    function status(msg, isError=false){
+      statusEl.textContent = msg;
+      statusEl.classList.toggle('error', isError);
+      if(msg){ setTimeout(()=>{ statusEl.textContent=''; statusEl.classList.remove('error'); }, 4000); }
+    }
+    function showOverlay(){
+      if(overlay.hidden){ overlay.hidden = false; setTimeout(()=> map.invalidateSize(), 80); }
+      else { map.invalidateSize(); }
+    }
+    function setImg(src){
+      const probe = new Image();
+      probe.onload = () => {
+        natW = probe.naturalWidth; natH = probe.naturalHeight;
+        origDataURL = src;
+        fitCanvasToPhoto();
+        img.src = src; img.style.display = 'block';
+        placeholder.style.display = 'none';
+        dropZone.classList.remove('dragover');
+        showOverlay();
+        status(`Photo loaded: ${natW}×${natH}`);
+      };
+      probe.src = src;
+    }
+
+    // ------- Time/Date helpers -------
+    const pad2 = n => String(n).padStart(2,'0');
+    const tzOffsetStr = d => {
+      const offMin = -d.getTimezoneOffset();
+      const sign = offMin>=0?'+':'-'; const abs=Math.abs(offMin);
+      return `${sign}${pad2(Math.floor(abs/60))}:${pad2(abs%60)}`;
+    };
+    const exifDate = d => `${d.getFullYear()}:${pad2(d.getMonth()+1)}:${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+    const overlayDate = d => {
+      const dd=pad2(d.getDate()), mm=pad2(d.getMonth()+1), yyyy=d.getFullYear();
+      const t = new Intl.DateTimeFormat(undefined,{hour:'numeric',minute:'2-digit',hour12:true}).format(d);
+      return `${dd}/${mm}/${yyyy} ${t} GMT ${tzOffsetStr(d)}`;
+    };
+    function selectedDate(){
+      const date = fDate.value, time = fTime.value || '00:00';
+      return new Date((date || new Date().toISOString().slice(0,10)) + 'T' + time);
+    }
+
+    // ------- Overlay fill -------
+    function applyOverlay(){
+      const title=(fLocation.value||'').trim();
+      const addr=(fAddress.value||'').trim();
+      const lat=parseFloat(fLat.value), lon=parseFloat(fLon.value);
+      const zoom=Math.max(2,Math.min(19,parseInt(fZoom.value||'16',10)));
+
+      oTitle.textContent = title || '—';
+      oAddress.textContent = addr || '—';
+
+      if(Number.isFinite(lat) && Number.isFinite(lon)){
+        oCoords.textContent = `Lat ${lat.toFixed(6)}°  Long ${lon.toFixed(6)}°`;
+        map.setView([lat,lon],zoom); marker.setLatLng([lat,lon]);
+      }else{
+        const ll=map.getCenter();
+        oCoords.textContent = `Lat ${ll.lat.toFixed(6)}°  Long ${ll.lng.toFixed(6)}°`;
+        marker.setLatLng(ll);
+      }
+      oDatetime.textContent = overlayDate(selectedDate());
+      showOverlay();
+      status('Overlay updated');
+    }
+
+    // ------- Geocoding -------
+    function composeTitle(addr){
+      const city = addr.city||addr.town||addr.village||addr.municipality||addr.county;
+      const parts=[]; if(city) parts.push(city); if(addr.state) parts.push(addr.state); if(addr.country) parts.push(addr.country);
+      return parts.join(', ');
+    }
+    async function reverseGeocodeCore(lat,lon){
+      const url=`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`;
+      const res=await fetch(url,{headers:{'Accept':'application/json'}}); if(!res.ok) throw new Error('Reverse lookup failed');
+      const j=await res.json(); return { title:j.address?composeTitle(j.address):'', addressLine:j.display_name||'' };
+    }
+    async function geocode(){
+      const q=(fLocation.value||'').trim(); if(!q){ status('Type a location to search',true); return; }
+      try{
+        status('Searching…');
+        const url=`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(q)}`;
+        const r=await fetch(url,{headers:{'Accept':'application/json'}}); if(!r.ok) throw new Error('Geocoding failed');
+        const d=await r.json(); if(!d||!d.length){ status('No match found',true); return; }
+        const hit=d[0]; const lat=parseFloat(hit.lat), lon=parseFloat(hit.lon);
+        fLat.value=lat.toFixed(6); fLon.value=lon.toFixed(6);
+        if(!fAddress.value) fAddress.value = hit.display_name || '';
+        if(!fLocation.value){ try{ const rr=await reverseGeocodeCore(lat,lon); if(rr.title) fLocation.value=rr.title; }catch{} }
+        map.setView([lat,lon], Number(fZoom.value||16)); marker.setLatLng([lat,lon]);
+        status('Location found ✓');
+      }catch(e){ console.error(e); status('Geocoding error',true); }
+    }
+    async function reverseGeocode(){
+      const lat=parseFloat(fLat.value), lon=parseFloat(fLon.value);
+      if(!Number.isFinite(lat)||!Number.isFinite(lon)){ status('Enter valid Lat/Lon first',true); return; }
+      try{
+        status('Fetching address…');
+        const {title,addressLine}=await reverseGeocodeCore(lat,lon);
+        if(title) fLocation.value=title;
+        if(addressLine) fAddress.value=addressLine;
+        map.setView([lat,lon], Number(fZoom.value||16)); marker.setLatLng([lat,lon]);
+        status('Reverse geocoded ✓');
+      }catch(e){ console.error(e); status('Reverse geocoding error',true); }
+    }
+
+    // ------- EXIF + download helpers -------
+    function dmsRational(deg){
+      const a=Math.abs(deg); const d=Math.floor(a); const mF=(a-d)*60; const m=Math.floor(mF); const s=(mF-m)*60;
+      return [[d,1],[m,1],[Math.round(s*10000),10000]];
+    }
+    function downloadDataURL(dataURL, filename){
+      const a=document.createElement('a'); a.href=dataURL; a.download=filename||'geotagged.jpg'; document.body.appendChild(a); a.click(); a.remove();
+    }
+    const safeSlug = s => (s||'geotagged').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'');
+
+    async function renderCanvasOfPhoto(){
+      if(!natW||!natH){ throw new Error('No photo loaded'); }
+      const targetW = natW;
+      const scale = Math.max(1, Math.min(4, targetW / dropZone.clientWidth)); // cap scale for memory safety
+      // Try to keep map tiles exportable
+      try{
+        const canvas = await html2canvas(dropZone, {
+          backgroundColor: null,
+          useCORS: true,
+          logging: false,
+          scale
+        });
+        // If canvas not exactly native size, resample to native
+        if(canvas.width !== natW || canvas.height !== natH){
+          const out = document.createElement('canvas');
+          out.width = natW; out.height = natH;
+          const ctx = out.getContext('2d');
+          ctx.drawImage(canvas, 0, 0, out.width, out.height);
+          return out;
+        }
+        return canvas;
+      }catch(e){
+        console.error(e);
+        throw new Error('Could not render the map/photo area (CORS or memory).');
+      }
+    }
+
+    function addExifToJPEG(jpegDataURL){
+      // Build EXIF blocks
+      const d = selectedDate();
+      const exifDateStr = exifDate(d);
+      const tzStr = tzOffsetStr(d);
+      const lat = parseFloat(fLat.value), lon = parseFloat(fLon.value);
+
+      const zeroth={}, exif={}, gps={};
+      zeroth[piexif.ImageIFD.DateTime] = exifDateStr;
+      exif[piexif.ExifIFD.DateTimeOriginal] = exifDateStr;
+      exif[piexif.ExifIFD.CreateDate] = exifDateStr;
+      if(piexif.ExifIFD.OffsetTimeOriginal) exif[piexif.ExifIFD.OffsetTimeOriginal] = tzStr;
+
+      if(Number.isFinite(lat) && Number.isFinite(lon)){
+        gps[piexif.GPSIFD.GPSLatitudeRef]  = lat>=0 ? 'N' : 'S';
+        gps[piexif.GPSIFD.GPSLatitude]     = dmsRational(lat);
+        gps[piexif.GPSIFD.GPSLongitudeRef] = lon>=0 ? 'E' : 'W';
+        gps[piexif.GPSIFD.GPSLongitude]    = dmsRational(lon);
+        gps[piexif.GPSIFD.GPSMapDatum]     = 'WGS-84';
+        gps[piexif.GPSIFD.GPSVersionID]    = [2,3,0,0];
+      }
+
+      const exifBytes = piexif.dump({ "0th":zeroth, "Exif":exif, "GPS":gps });
+      try{
+        return piexif.insert(exifBytes, jpegDataURL);
+      }catch(e){
+        console.error(e);
+        throw new Error('EXIF write failed (image too large or unsupported).');
+      }
+    }
+
+    async function downloadComposite(){
+      if(!origDataURL){ status('Load a photo first', true); return; }
+      status('Rendering…');
+      try{
+        const canvas = await renderCanvasOfPhoto();  // DOM → canvas at high res
+        const jpeg = canvas.toDataURL('image/jpeg', 0.95);
+        const withExif = addExifToJPEG(jpeg);
+        const d = selectedDate();
+        const name = [
+          safeSlug(fLocation.value || 'photo'),
+          d.getFullYear()+pad2(d.getMonth()+1)+pad2(d.getDate())+'_'+pad2(d.getHours())+pad2(d.getMinutes())+pad2(d.getSeconds())
+        ].join('_') + '.jpg';
+        downloadDataURL(withExif, name);
+        status('Downloaded ✓');
+      }catch(err){
+        status(err.message || 'Could not export', true);
+      }
+    }
+
+    // ------- Drag & Drop / Upload -------
+    dropZone.addEventListener('click', () => fileInput.click());
+    dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+    dropZone.addEventListener('drop', e => {
+      e.preventDefault(); dropZone.classList.remove('dragover');
+      const file = e.dataTransfer.files && e.dataTransfer.files[0];
+      if(file && file.type.startsWith('image/')){
+        const reader = new FileReader();
+        reader.onload = () => setImg(reader.result);
+        reader.readAsDataURL(file);
+      } else { status('Please drop an image file', true); }
+    });
+    fileInput.addEventListener('change', e => {
+      const file = e.target.files && e.target.files[0];
+      if(file && file.type.startsWith('image/')){
+        const reader = new FileReader();
+        reader.onload = () => setImg(reader.result);
+        reader.readAsDataURL(file);
+      }
+    });
+
+    // ------- Buttons -------
+    document.getElementById('btnGeocode').addEventListener('click', geocode);
+    document.getElementById('btnReverse').addEventListener('click', reverseGeocode);
+    document.getElementById('btnUseMarker').addEventListener('click', () => {
+      const ll = marker.getLatLng(); fLat.value = ll.lat.toFixed(6); fLon.value = ll.lng.toFixed(6);
+      status('Copied marker coordinates');
+    });
+    document.getElementById('btnApply').addEventListener('click', applyOverlay);
+    document.getElementById('btnDownload').addEventListener('click', downloadComposite);
+    document.getElementById('btnClear').addEventListener('click', () => {
+      img.src=''; img.style.display='none'; placeholder.style.display='block';
+      overlay.hidden=true; natW=null; natH=null; origDataURL=null; status('Cleared');
+      dropZone.style.width=''; dropZone.style.aspectRatio='';
+    });
+
+    // Ensure map renders if overlay appears later
+    setTimeout(()=> map.invalidateSize(), 200);
+  </script>
+</body>
+</html>
+
+
+Yep—what you’re seeing is a **piexif.js** quirk. That “cannot read properties of undefined (reading 'types')” happens when we hand the EXIF writer a tag ID it doesn’t know (common on builds that don’t define `OffsetTimeOriginal`). Easy fix: don’t write that tag, and sanitize tags before dumping.
+
+### Quick patch (just replace this function)
+
+Find the `addExifToJPEG` function in your file and replace it with the version below:
+
+```html
+<script>
+function addExifToJPEG(jpegDataURL){
+  if (typeof piexif === "undefined") {
+    throw new Error("EXIF library failed to load");
+  }
+
+  // Build core timestamps
+  const d = selectedDate();
+  const exifDateStr = (d.getFullYear()) + ":" +
+                      String(d.getMonth()+1).padStart(2,'0') + ":" +
+                      String(d.getDate()).padStart(2,'0') + " " +
+                      String(d.getHours()).padStart(2,'0') + ":" +
+                      String(d.getMinutes()).padStart(2,'0') + ":" +
+                      String(d.getSeconds()).padStart(2,'0');
+
+  // Lat/Lon
+  const lat = parseFloat(document.getElementById('lat').value);
+  const lon = parseFloat(document.getElementById('lon').value);
+
+  // Helper: convert decimal degrees to [ [deg,1],[min,1],[sec*10000,10000] ]
+  const dmsRational = (deg) => {
+    const a = Math.abs(deg);
+    const dd = Math.floor(a);
+    const mf = (a - dd) * 60;
+    const mm = Math.floor(mf);
+    const ss = (mf - mm) * 60;
+    return [[dd,1],[mm,1],[Math.round(ss*10000),10000]];
+  };
+
+  // Construct IFDs using only well-supported tags
+  const zeroth = {};
+  const exif   = {};
+  const gps    = {};
+
+  // Safe, widely-supported tags
+  zeroth[piexif.ImageIFD.DateTime]              = exifDateStr;
+  exif[piexif.ExifIFD.DateTimeOriginal]         = exifDateStr;
+  exif[piexif.ExifIFD.CreateDate]               = exifDateStr;
+
+  if (Number.isFinite(lat) && Number.isFinite(lon)) {
+    gps[piexif.GPSIFD.GPSLatitudeRef]  = lat >= 0 ? 'N' : 'S';
+    gps[piexif.GPSIFD.GPSLatitude]     = dmsRational(lat);
+    gps[piexif.GPSIFD.GPSLongitudeRef] = lon >= 0 ? 'E' : 'W';
+    gps[piexif.GPSIFD.GPSLongitude]    = dmsRational(lon);
+    // Optional tags (supported in piexif): map datum + version
+    gps[piexif.GPSIFD.GPSMapDatum]     = 'WGS-84';
+    gps[piexif.GPSIFD.GPSVersionID]    = [2,3,0,0];
+  }
+
+  // Sanitize: remove any non-numeric/unknown tag IDs (prevents the “types” error)
+  const sanitize = (ifdObj, ifdName) => {
+    const out = {};
+    const tags = piexif.TAGS[ifdName] || {};
+    Object.keys(ifdObj).forEach(k => {
+      const id = Number(k);
+      if (Number.isFinite(id) && tags[id]) out[id] = ifdObj[k];
+    });
+    return out;
+  };
+
+  const payload = {
+    "0th":  sanitize(zeroth, "0th"),
+    "Exif": sanitize(exif,   "Exif"),
+    "GPS":  sanitize(gps,    "GPS")
+  };
+
+  const exifBytes = piexif.dump(payload);
+  try {
+    return piexif.insert(exifBytes, jpegDataURL);
+  } catch (e) {
+    console.error(e);
+    throw new Error("EXIF write failed (image too large or unsupported).");
+  }
+}
+</script>
+```
+
+**Also remove** any earlier line that tried to set `OffsetTimeOriginal` (timezone) like:
+
+```js
+// ❌ remove this line if you have it
+if (piexif.ExifIFD.OffsetTimeOriginal)
+  exif[piexif.ExifIFD.OffsetTimeOriginal] = tzStr;
+```
+
+That tag isn’t defined in some builds of piexif.js—triggering exactly the error you hit.
+
+---
+
+### Why this fixes it
+
+* The error comes from `piexif.dump(...)` when it encounters an **unknown tag ID** and tries to read its `types`.
+* The new function only sets **widely supported** tag IDs and **sanitizes** each IFD using `piexif.TAGS` so nothing invalid slips through.
+
+### Bonus (optional)
+
+If you’d like the **title/address** to be searchable in file info too, add these two lines right after we set `DateTime`:
+
+```js
+zeroth[piexif.ImageIFD.ImageDescription] = (document.getElementById('location').value || '');
+exif[piexif.ExifIFD.UserComment] = (document.getElementById('address').value || '');
+```
+
+### If the download still doesn’t trigger
+
+* Check the status message. If it says CORS/tainted canvas, your network blocked the satellite tiles from being captured. Quick workaround: change the tile layer to a CORS-friendly one (not satellite), e.g.:
+
+```js
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom: 19, crossOrigin: true}).addTo(map);
+```
+
+(or try another browser).
+
+Want me to send a **full, ready-to-paste file** with this patch baked in? I can drop it in one go.
